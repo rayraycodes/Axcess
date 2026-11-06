@@ -36,7 +36,7 @@ from audit.analyzer.axe import AxeAnalyzer, AxeViolation
 from audit.analyzer.axe import Level as AxeLevel
 from audit.analyzer.focus import FocusFinding, FocusProbe
 from audit.analyzer.interaction import DEFAULT_BLOCKED_LABELS, InteractionProbe, RevealedViolation
-from audit.analyzer.keyboard import KeyboardProbe, KeyboardTrap
+from audit.analyzer.keyboard import KeyboardFinding, KeyboardProbe
 from audit.analyzer.ocr.pool import OcrPool
 from audit.analyzer.responsive import ResponsiveFinding, ResponsiveProbe
 from audit.analyzer.visual import VisualFinding, VisualProbe
@@ -1493,7 +1493,7 @@ def _persist_keyboard(
     ctx: _WorkerContext,
     *,
     page_id: int,
-    traps: tuple[KeyboardTrap, ...],
+    traps: tuple[KeyboardFinding, ...],
     screenshots: Mapping[str, bytes],
 ) -> None:
     """Write keyboard-trap findings + bump the keyboard counters.

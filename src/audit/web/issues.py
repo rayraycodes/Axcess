@@ -639,6 +639,11 @@ def _axe_issue_rows(
         raw_rule_id = str(g["rule_id"])
         pipeline = str(g.get("pipeline") or "axe")
         finding_rows = list(g.get("findings", []))
+        modal_keyboard_rule = pipeline == "keyboard" and raw_rule_id in {
+            "modal-focus-not-contained",
+            "modal-no-keyboard-dismiss",
+            "modal-initial-focus-outside",
+        }
         legacy_keyboard_observation = pipeline == "keyboard" and (
             raw_rule_id in {"keyboard-trap-modal-no-escape", "keyboard-trap-iframe"}
             or (
@@ -753,6 +758,84 @@ def _axe_issue_rows(
                     "Test the component manually with Tab, Shift+Tab, and any "
                     "documented exit command.",
                     "Run a new scan to collect bidirectional keyboard-exit measurements.",
+                )
+            elif raw_rule_id == "modal-focus-not-contained":
+                default_title = "Modal dialog does not contain keyboard focus"
+                evidence_summary = (
+                    "Measured Tab movement from inside an open aria-modal dialog reached "
+                    "background content while the dialog stayed open; confirm the missing "
+                    "focus trap or inert background manually."
+                )
+                alfa_description = (
+                    "Starting from a control inside the open modal dialog, repeated Tab "
+                    "presses moved keyboard focus onto content outside the dialog while "
+                    "the dialog remained open. Sighted mouse users are blocked by the "
+                    "overlay, but keyboard users can operate the background page."
+                )
+                alfa_why_matters = (
+                    "A modal that announces itself as modal (aria-modal) but lets focus "
+                    "reach background content creates an inconsistent, confusing keyboard "
+                    "experience and can hide the focused control behind the overlay. This "
+                    "is a measured review lead under SC 2.1.1, not an automated "
+                    "conformance verdict."
+                )
+                alfa_fix_steps = (
+                    "Trap focus within the dialog while it is open (a focus-trap utility, "
+                    "inert on the background, or a native <dialog> with showModal()).",
+                    "Retest with Tab and Shift+Tab: focus should cycle through the "
+                    "dialog's controls only.",
+                    "Confirm focus returns to the triggering control when the dialog closes.",
+                )
+            elif raw_rule_id == "modal-no-keyboard-dismiss":
+                evidence_confidence = "low"
+                default_title = "Modal dialog may lack a keyboard dismiss affordance"
+                evidence_summary = (
+                    "Escape neither closed the dialog nor moved focus out, and no "
+                    "focusable close/cancel control was detected inside; verify how a "
+                    "keyboard user is expected to leave."
+                )
+                alfa_description = (
+                    "With focus inside the open modal dialog, pressing Escape left the "
+                    "dialog open with focus still inside, and the probe found no "
+                    "focusable control named like close, cancel, or dismiss within the "
+                    "dialog."
+                )
+                alfa_why_matters = (
+                    "Missing Escape handling alone is not a WCAG failure — a dialog may "
+                    "provide another documented keyboard exit. But a modal with no "
+                    "discoverable keyboard way out strands keyboard users. Confirm the "
+                    "intended exit path manually before reporting a barrier."
+                )
+                alfa_fix_steps = (
+                    "Do not report a failure from this observation alone.",
+                    "Check the dialog manually for any keyboard exit: Escape, a close "
+                    "or cancel control, form submission, or a documented command.",
+                    "If none exists, add an Escape handler and a visible, focusable close control.",
+                )
+            elif raw_rule_id == "modal-initial-focus-outside":
+                review_lane = "informational"
+                evidence_confidence = "low"
+                default_title = "Focus not moved into modal dialog on open"
+                evidence_summary = (
+                    "The page loaded with a modal dialog open while focus stayed outside "
+                    "it; verify the intended focus behavior manually."
+                )
+                alfa_description = (
+                    "At page load a modal dialog was already open, but "
+                    "document.activeElement remained outside the dialog. A keyboard user "
+                    "must Tab through intervening content before reaching the dialog "
+                    "that visually dominates the page."
+                )
+                alfa_why_matters = (
+                    "This is an observational lead: dialogs opened by user action "
+                    "usually move focus at open time, which a load-time probe cannot "
+                    "see. Confirm the real opening interaction before treating it as an "
+                    "issue."
+                )
+                alfa_fix_steps = (
+                    "Reproduce how the dialog actually opens for a user.",
+                    "If focus does not move into the dialog on open, focus the dialog "
+                    "or its first control when it is shown.",
                 )
             else:
                 default_title = "Keyboard exit blocked in both directions"
@@ -887,6 +970,7 @@ def _axe_issue_rows(
                     if pipeline in {"alfa", "protected_image", "visual"}
                     or legacy_keyboard_observation
                     or legacy_visual_motion_observation
+                    or modal_keyboard_rule
                     else None
                 )
                 or (g.get("help") if pipeline != "semantic" else None)

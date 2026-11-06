@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from audit.analyzer.axe import AxeViolation
     from audit.analyzer.focus import FocusFinding
     from audit.analyzer.interaction import RevealedViolation
-    from audit.analyzer.keyboard import KeyboardTrap
+    from audit.analyzer.keyboard import KeyboardFinding
     from audit.analyzer.responsive import ResponsiveFinding
     from audit.analyzer.visual import VisualFinding
 
@@ -45,11 +45,11 @@ class FetchResult:
     body: bytes
     retry_after: float | None
     axe_violations: tuple[AxeViolation, ...] = field(default=())
-    # SC 2.1.2 keyboard-trap probe results. Populated only by JsFetcher
-    # when a KeyboardProbe is attached (default on; ``--skip-keyboard``
-    # disables). Static fetches always leave it empty (probing requires
-    # a live Playwright page).
-    keyboard_traps: tuple[KeyboardTrap, ...] = field(default=())
+    # Keyboard probe results (SC 2.1.2 traps + SC 2.1.1 modal checks).
+    # Populated only by JsFetcher when a KeyboardProbe is attached
+    # (default on; ``--skip-keyboard`` disables). Static fetches always
+    # leave it empty (probing requires a live Playwright page).
+    keyboard_traps: tuple[KeyboardFinding, ...] = field(default=())
     # Responsive/zoom/text-spacing probe results (SC 1.4.4 / 1.4.10 /
     # 1.4.12). Same population rules as the keyboard probe; default on,
     # ``--skip-responsive`` disables.

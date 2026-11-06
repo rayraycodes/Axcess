@@ -1,26 +1,35 @@
-"""Playwright-driven keyboard-trap probe (SC 2.1.2).
+"""Playwright-driven keyboard probe (SC 2.1.2 traps + SC 2.1.1 modal checks).
 
 What it does
 ============
 
-The probe runs one conservative check against an already-loaded Playwright page:
+The probe runs two conservative checks against an already-loaded Playwright page:
 
-1. **Bidirectional Tab-walk** — press Tab through the page and record
-   ``document.activeElement`` after each press. A review lead is emitted
-   only when the same observable element blocks several consecutive
+1. **Modal-dialog keyboard checks (SC 2.1.1)** — for each modal dialog
+   already open at page load: record whether initial focus moved into
+   the dialog, Tab-walk from inside an ``aria-modal`` dialog to see
+   whether focus reaches background content while the dialog stays
+   open, and press Escape to see whether the dialog offers any keyboard
+   dismiss affordance. All three are review leads requiring manual
+   confirmation, never automatic conformance failures.
+
+2. **Bidirectional Tab-walk (SC 2.1.2)** — press Tab through the page and
+   record ``document.activeElement`` after each press. A review lead is
+   emitted only when the same observable element blocks several consecutive
    Tab attempts *and* several consecutive Shift+Tab attempts.
 
-The probe deliberately does not infer a trap from a two-element focus
-cycle, Escape behavior, or an iframe remaining ``document.activeElement``.
-Those observations all have common conforming explanations. Missing iframe
-titles are covered by the DOM engines and belong to accessible-name testing,
-not SC 2.1.2.
+The probe deliberately does not infer an SC 2.1.2 *trap* from a two-element
+focus cycle, Escape behavior, or an iframe remaining
+``document.activeElement``. Those observations all have common conforming
+explanations. Missing iframe titles are covered by the DOM engines and
+belong to accessible-name testing, not SC 2.1.2.
 
 What it does NOT detect
 =======================
 
-* Traps that only appear after user interaction (clicking to mount a
-  modal we never see).
+* Traps or modal dialogs that only appear after user interaction
+  (clicking to mount a modal we never see — phase 2 would need the
+  interaction probe's click machinery).
 * Traps inside closed shadow DOM or embedded browsing contexts.
 * Pages behind login.
 * Traps that only manifest with screen-reader virtual cursors.
@@ -48,9 +57,14 @@ from typing import TYPE_CHECKING
 
 from audit.analyzer.keyboard.base import (
     RULE_IFRAME,
+    RULE_MODAL_FOCUS_NOT_CONTAINED,
+    RULE_MODAL_INITIAL_FOCUS_OUTSIDE,
+    RULE_MODAL_NO_KEYBOARD_DISMISS,
     RULE_NO_ESCAPE,
     RULE_STUCK,
+    KeyboardFinding,
     KeyboardTrap,
+    ModalKeyboardFinding,
 )
 
 if TYPE_CHECKING:
@@ -73,14 +87,204 @@ DEFAULT_STUCK_THRESHOLD = 4
 # move focus into iframes / sub-documents we walk through.
 DEFAULT_MAX_FOCUSABLE = 50
 
-# Retained for source compatibility with callers that configured the old
-# Escape observation. The production run no longer treats Escape behavior as
-# proof of SC 2.1.2.
+# Cap on how many open modal dialogs the SC 2.1.1 checks examine per page.
+# (Originally introduced for the retired SC 2.1.2 Escape observation.)
 DEFAULT_MAX_MODALS = 5
+
+# Cap on Tab presses per dialog during the containment walk. A dialog with
+# more focusable controls than this is skipped rather than half-walked.
+_MAX_CONTAINMENT_TABS = 25
+
+# Accessible-name fragments that mark a control as a dismiss affordance.
+# Lowercase; matched as substrings of the control's visible text,
+# aria-label, or title. Kept deliberately short — a miss only downgrades
+# the observation, it never upgrades one.
+_DISMISS_NAME_FRAGMENTS = (
+    "close",
+    "dismiss",
+    "cancel",
+    "exit",
+    "\u00d7",  # multiplication sign, the classic close glyph
+    "\u2715",  # multiplication x
+    "\u2716",  # heavy multiplication x
+)
 
 # How many chars of the element's outerHTML we keep on the finding for
 # rendering / debugging.
 _SNIPPET_CHARS = 240
+
+
+# --- In-page JS for the modal checks. Kept at module level so each
+# snippet is readable as one unit and testable by eye. All of them pierce
+# open shadow roots the same way _active_element_signature does, and walk
+# ancestry through shadow hosts (getRootNode().host) so a focused element
+# inside a component within the dialog still counts as "inside". ---
+
+_ENUMERATE_MODALS_JS = """
+(maxModals) => {
+  const sel = (
+    'dialog[open], ' +
+    '[role="dialog"][aria-modal="true"], ' +
+    '[aria-modal="true"][role="alertdialog"]'
+  );
+  const focusableSel = (
+    'a[href], button:not([disabled]), input:not([disabled]), ' +
+    'select:not([disabled]), textarea:not([disabled]), ' +
+    '[tabindex]:not([tabindex="-1"])'
+  );
+  let ae = document.activeElement;
+  while (ae && ae.shadowRoot && ae.shadowRoot.activeElement) {
+    ae = ae.shadowRoot.activeElement;
+  }
+  const insideOf = (node, el) => {
+    let cur = node;
+    while (cur) {
+      if (cur === el) return true;
+      cur = cur.parentElement || (cur.getRootNode && cur.getRootNode().host) || null;
+    }
+    return false;
+  };
+  const out = [];
+  const list = document.querySelectorAll(sel);
+  for (let i = 0; i < list.length; i++) {
+    const el = list[i];
+    const cs = getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+    const inside = el.querySelectorAll(focusableSel);
+    if (!inside.length) continue;
+    const mark = 'kbprobe-modal-' + i;
+    el.setAttribute('data-kbprobe-mark', mark);
+    let ariaModal = el.getAttribute('aria-modal') === 'true';
+    if (!ariaModal) {
+      // A native dialog opened via showModal() is modal without the
+      // attribute; :modal is the only runtime signal.
+      try { ariaModal = el.matches(':modal'); } catch (e) {}
+    }
+    const id = el.id ? '#' + el.id : '';
+    let selOut = el.tagName.toLowerCase() + id;
+    if (!id && el.className && typeof el.className === 'string') {
+      const cls = el.className.trim().split(/\\s+/).slice(0, 2).join('.');
+      if (cls) selOut = el.tagName.toLowerCase() + '.' + cls;
+    }
+    out.push({
+      mark: mark,
+      selector: selOut,
+      snippet: el.outerHTML.slice(0, 240),
+      ariaModal: ariaModal,
+      containsFocus: !!(ae && ae !== document.body && insideOf(ae, el)),
+    });
+    if (out.length >= maxModals) break;
+  }
+  return out;
+}
+"""
+
+_FOCUS_FIRST_IN_MODAL_JS = """
+(mark) => {
+  const el = document.querySelector('[data-kbprobe-mark="' + mark + '"]');
+  if (!el) return false;
+  const first = el.querySelector(
+    'a[href], button:not([disabled]), input:not([disabled]), ' +
+    'select:not([disabled]), textarea:not([disabled]), ' +
+    '[tabindex]:not([tabindex="-1"])'
+  );
+  if (!first) return false;
+  try { first.focus(); } catch (e) { return false; }
+  let ae = document.activeElement;
+  while (ae && ae.shadowRoot && ae.shadowRoot.activeElement) {
+    ae = ae.shadowRoot.activeElement;
+  }
+  return ae === first;
+}
+"""
+
+_MODAL_FOCUS_POSITION_JS = """
+(mark) => {
+  const el = document.querySelector('[data-kbprobe-mark="' + mark + '"]');
+  let dialogOpen = false;
+  if (el) {
+    const cs = getComputedStyle(el);
+    dialogOpen = (
+      cs.display !== 'none' && cs.visibility !== 'hidden' &&
+      (el.tagName.toLowerCase() !== 'dialog' || el.open)
+    );
+  }
+  let ae = document.activeElement;
+  while (ae && ae.shadowRoot && ae.shadowRoot.activeElement) {
+    ae = ae.shadowRoot.activeElement;
+  }
+  const isBody = !ae || ae === document.body || ae === document.documentElement;
+  let inside = false;
+  if (el && ae && !isBody) {
+    let cur = ae;
+    while (cur) {
+      if (cur === el) { inside = true; break; }
+      cur = cur.parentElement || (cur.getRootNode && cur.getRootNode().host) || null;
+    }
+  }
+  let outsideSelector = '';
+  if (!inside && !isBody && ae) {
+    const tag = ae.tagName.toLowerCase();
+    const id = ae.id ? '#' + ae.id : '';
+    outsideSelector = tag + id;
+    if (!id && ae.className && typeof ae.className === 'string') {
+      const cls = ae.className.trim().split(/\\s+/).slice(0, 2).join('.');
+      if (cls) outsideSelector = tag + '.' + cls;
+    }
+  }
+  return { dialogOpen: dialogOpen, inside: inside, isBody: isBody,
+           outsideSelector: outsideSelector };
+}
+"""
+
+_MODAL_DISMISS_STATE_JS = """
+({ mark, frags }) => {
+  const el = document.querySelector('[data-kbprobe-mark="' + mark + '"]');
+  let open = false;
+  if (el) {
+    const cs = getComputedStyle(el);
+    open = (
+      cs.display !== 'none' && cs.visibility !== 'hidden' &&
+      (el.tagName.toLowerCase() !== 'dialog' || el.open)
+    );
+  }
+  let ae = document.activeElement;
+  while (ae && ae.shadowRoot && ae.shadowRoot.activeElement) {
+    ae = ae.shadowRoot.activeElement;
+  }
+  let inside = false;
+  if (el && ae && ae !== document.body) {
+    let cur = ae;
+    while (cur) {
+      if (cur === el) { inside = true; break; }
+      cur = cur.parentElement || (cur.getRootNode && cur.getRootNode().host) || null;
+    }
+  }
+  let hasDismiss = false;
+  if (el) {
+    const dialogFormSel =
+      'form[method="dialog"] button, form[method="dialog"] input[type="submit"]';
+    if (el.querySelector(dialogFormSel)) {
+      hasDismiss = true;
+    }
+    if (!hasDismiss) {
+      const controls = el.querySelectorAll(
+        'button, a[href], input[type="button"], input[type="submit"], [role="button"]'
+      );
+      for (const c of controls) {
+        const name = (
+          (c.textContent || '') + ' ' +
+          (c.getAttribute('aria-label') || '') + ' ' +
+          (c.getAttribute('title') || '') + ' ' +
+          (c.value || '')
+        ).toLowerCase();
+        if (frags.some(f => name.includes(f))) { hasDismiss = true; break; }
+      }
+    }
+  }
+  return { open: open, inside: inside, hasDismiss: hasDismiss };
+}
+"""
 
 
 @dataclass
@@ -94,19 +298,205 @@ class KeyboardProbe:
     # protected companion opts into terse, non-evidence diagnostics instead.
     suppress_diagnostics: bool = False
 
-    async def run(self, page: Page) -> list[KeyboardTrap]:
-        """Probe ``page`` for keyboard traps. Returns a (possibly empty) list.
+    async def run(self, page: Page) -> list[KeyboardFinding]:
+        """Probe ``page`` for keyboard findings. Returns a (possibly empty) list.
 
         Safe to call from inside ``JsFetcher.fetch`` — operates on the
         live page before the context closes. Never raises; any failure
         logs at WARNING and returns the findings collected so far.
+
+        The modal checks run FIRST: they must observe where the page put
+        initial focus before the tab walk moves it.
         """
-        findings: list[KeyboardTrap] = []
+        findings: list[KeyboardFinding] = []
+        try:
+            findings.extend(await self._probe_modal_keyboard(page))
+        except Exception as exc:
+            self._log_failure("modal_keyboard", exc)
         try:
             findings.extend(await self._probe_tab_walk(page))
         except Exception as exc:
             self._log_failure("tab_walk", exc)
         return findings
+
+    # -----------------------------------------------------------------
+    # Modal-dialog keyboard checks (SC 2.1.1).
+    # -----------------------------------------------------------------
+
+    async def _probe_modal_keyboard(self, page: Page) -> list[ModalKeyboardFinding]:
+        """Check keyboard behavior of modal dialogs open at page load.
+
+        Three observations per dialog, all SC 2.1.1 review leads:
+
+        * ``modal-initial-focus-outside`` — the page loaded with the
+          dialog open but focus never moved into it. Must be computed
+          before anything else moves focus (hence this probe runs before
+          the tab walk).
+        * ``modal-focus-not-contained`` — starting inside an
+          ``aria-modal`` dialog, Tab reached real background content
+          while the dialog stayed open. Plain non-modal ``dialog[open]``
+          elements are exempt: containment is only expected of modals.
+        * ``modal-no-keyboard-dismiss`` — Escape neither closed the
+          dialog nor moved focus out, and no focusable close/cancel
+          control was found inside. Explicitly advisory: a page may
+          provide another documented keyboard exit.
+
+        Never raises; each step is wrapped and logged via
+        :meth:`_log_failure`. Markers are cleaned up best-effort so they
+        don't leak into saved HTML.
+        """
+        try:
+            raw = await page.evaluate(_ENUMERATE_MODALS_JS, self.max_modals)
+        except Exception as exc:
+            self._log_failure("modal_enumerate", exc)
+            return []
+        modals = [m for m in (raw or []) if isinstance(m, dict) and m.get("mark")]
+        if not modals:
+            return []
+
+        findings: list[ModalKeyboardFinding] = []
+        try:
+            # Observation 1 — initial focus. If any dialog contains the
+            # initial focus, the page made a reasonable choice; only flag
+            # when focus is outside every open modal dialog.
+            if not any(m.get("containsFocus") for m in modals):
+                for m in modals:
+                    findings.append(
+                        ModalKeyboardFinding(
+                            rule_id=RULE_MODAL_INITIAL_FOCUS_OUTSIDE,
+                            impact="minor",
+                            target_selector=str(m.get("selector", "(unknown)")),
+                            failure_summary=(
+                                "Measured initial focus: the page loaded with this modal "
+                                "dialog open while document.activeElement remained outside "
+                                "the dialog. Keyboard users must Tab through intervening "
+                                "content to reach it. Verify the intended focus behavior "
+                                "manually — the dialog may receive focus by another path."
+                            ),
+                            html_snippet=str(m.get("snippet", ""))[:_SNIPPET_CHARS],
+                            help=(
+                                "When a modal dialog opens, move keyboard focus to an "
+                                "element inside it."
+                            ),
+                        )
+                    )
+
+            for m in modals:
+                mark = str(m["mark"])
+                # Observation 2 — focus containment (aria-modal only).
+                if m.get("ariaModal"):
+                    try:
+                        finding = await self._check_modal_containment(page, mark, m)
+                    except Exception as exc:
+                        self._log_failure("modal_containment", exc)
+                        finding = None
+                    if finding is not None:
+                        findings.append(finding)
+                # Observation 3 — keyboard dismiss.
+                try:
+                    finding = await self._check_modal_dismiss(page, mark, m)
+                except Exception as exc:
+                    self._log_failure("modal_dismiss", exc)
+                    finding = None
+                if finding is not None:
+                    findings.append(finding)
+        finally:
+            # Remove our markers so they don't leak into the page's saved
+            # HTML or content hash. Best-effort, never blocking.
+            with contextlib.suppress(Exception):
+                await page.evaluate(
+                    """
+                    () => {
+                      document.querySelectorAll('[data-kbprobe-mark]').forEach(el => {
+                        el.removeAttribute('data-kbprobe-mark');
+                      });
+                    }
+                    """
+                )
+        return findings
+
+    async def _check_modal_containment(
+        self, page: Page, mark: str, modal: dict[str, object]
+    ) -> ModalKeyboardFinding | None:
+        """Tab from inside the marked aria-modal dialog; flag focus leaks.
+
+        Focus transiting through ``body`` (Chromium routes focus through
+        the document while wrapping past browser chrome) is not a leak;
+        only landing on a real focusable element outside the dialog
+        subtree — while the dialog is still open — is.
+        """
+        if not await page.evaluate(_FOCUS_FIRST_IN_MODAL_JS, mark):
+            # Couldn't put focus inside; the walk would measure the wrong
+            # thing. Skip rather than guess.
+            return None
+        max_tabs = min(self.max_focusable, _MAX_CONTAINMENT_TABS)
+        for presses in range(1, max_tabs + 1):
+            await page.keyboard.press("Tab")
+            pos = await page.evaluate(_MODAL_FOCUS_POSITION_JS, mark)
+            if not isinstance(pos, dict) or not pos.get("dialogOpen"):
+                # Dialog closed or vanished mid-walk — nothing to contain.
+                return None
+            if pos.get("inside") or pos.get("isBody"):
+                continue
+            outside = str(pos.get("outsideSelector") or "(unknown)")
+            return ModalKeyboardFinding(
+                rule_id=RULE_MODAL_FOCUS_NOT_CONTAINED,
+                impact="serious",
+                target_selector=str(modal.get("selector", "(unknown)")),
+                failure_summary=(
+                    "Measured keyboard containment: starting inside this open "
+                    "aria-modal dialog, focus reached content outside the dialog "
+                    f"({outside}) after {presses} Tab press(es) while the dialog "
+                    "stayed open. Background content remains keyboard-operable "
+                    "behind the modal. Verify manually whether a focus trap or "
+                    "inert background is missing."
+                ),
+                html_snippet=str(modal.get("snippet", ""))[:_SNIPPET_CHARS],
+                help=(
+                    "Keyboard focus should stay within an open modal dialog "
+                    "until the dialog is dismissed."
+                ),
+            )
+        return None
+
+    async def _check_modal_dismiss(
+        self, page: Page, mark: str, modal: dict[str, object]
+    ) -> ModalKeyboardFinding | None:
+        """Press Escape inside the marked dialog; flag a missing keyboard exit.
+
+        Escape counts as handled when the dialog closes/hides OR focus
+        leaves the dialog subtree (close-and-return-focus implementations
+        often only move focus). A visible close/cancel/dismiss control, or
+        a ``form[method=dialog]`` submit, also counts as a keyboard exit.
+        """
+        if not await page.evaluate(_FOCUS_FIRST_IN_MODAL_JS, mark):
+            return None
+        await page.keyboard.press("Escape")
+        state = await page.evaluate(
+            _MODAL_DISMISS_STATE_JS, {"mark": mark, "frags": list(_DISMISS_NAME_FRAGMENTS)}
+        )
+        if not isinstance(state, dict):
+            return None
+        if state.get("open") and state.get("inside") and not state.get("hasDismiss"):
+            return ModalKeyboardFinding(
+                rule_id=RULE_MODAL_NO_KEYBOARD_DISMISS,
+                impact="moderate",
+                target_selector=str(modal.get("selector", "(unknown)")),
+                failure_summary=(
+                    "Measured dismiss behavior: pressing Escape left this modal "
+                    "dialog open with focus still inside, and no focusable "
+                    "close, cancel, or dismiss control was detected inside the "
+                    "dialog. This is not automatically a WCAG failure — the page "
+                    "may provide another documented keyboard exit. Verify "
+                    "manually how a keyboard user is expected to leave."
+                ),
+                html_snippet=str(modal.get("snippet", ""))[:_SNIPPET_CHARS],
+                help=(
+                    "Modal dialogs should be dismissible with the keyboard, for "
+                    "example via Escape or a focusable close control."
+                ),
+            )
+        return None
 
     # -----------------------------------------------------------------
     # Check 1 — Tab walk.

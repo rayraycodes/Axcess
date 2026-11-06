@@ -42,7 +42,7 @@ from audit.analyzer.alfa import AlfaAnalyzer, AlfaError, AlfaFinding, chromium_e
 from audit.analyzer.alfa import availability as alfa_availability
 from audit.analyzer.axe import AxeAnalyzer, AxeViolation
 from audit.analyzer.focus import FocusFinding, FocusProbe
-from audit.analyzer.keyboard import KeyboardProbe, KeyboardTrap
+from audit.analyzer.keyboard import KeyboardFinding, KeyboardProbe
 from audit.analyzer.responsive import ResponsiveFinding, ResponsiveProbe
 from audit.crawler import url_policy
 from audit.crawler.fetcher import FetchError, FetchResult
@@ -996,7 +996,7 @@ def _index_findings_from_axe(
 
 def _index_findings_from_probe(
     pipeline: Literal["keyboard", "responsive", "focus"],
-    findings: Iterable[KeyboardTrap | ResponsiveFinding | FocusFinding],
+    findings: Iterable[KeyboardFinding | ResponsiveFinding | FocusFinding],
     *,
     page_url: str,
     index_hmac_key: bytes,
