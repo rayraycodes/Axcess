@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>SC 2.1.1 fixture — aria-modal dialog leaks focus</title>
+</head>
+<body>
+  <main>
+    <h1>Modal announces aria-modal but does not contain focus</h1>
+    <p>Positive control for <code>modal-focus-not-contained</code> only:
+       initial focus is inside the dialog and Escape closes it, but Tab
+       walks straight out to background content.</p>
+
+    <a id="opener" href="/before">Background link</a>
+
+    <div id="dlg" role="dialog" aria-modal="true" aria-labelledby="dlg-title"
+         style="border:2px solid #333; padding:1rem; max-width:32rem;">
+      <h2 id="dlg-title">Confirm action</h2>
+      <input type="text" id="dlg-input" placeholder="Comment">
+      <button type="button" id="dlg-ok">OK</button>
+    </div>
+
+    <a id="footer-link" href="/after">Footer link (reachable from inside the dialog)</a>
+
+    <script>
+      const dlg = document.getElementById('dlg');
+      // Initial focus moves into the dialog (no initial-focus finding)...
+      document.getElementById('dlg-input').focus();
+      // ...and Escape closes it (no dismiss finding). But there is NO
+      // focus trap: Tab leaves the dialog while it is open.
+      dlg.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape') {
+          dlg.style.display = 'none';
+          document.getElementById('opener').focus();
+        }
+      });
+    </script>
+  </main>
+</body>
+</html>

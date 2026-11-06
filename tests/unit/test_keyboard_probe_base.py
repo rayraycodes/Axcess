@@ -15,12 +15,18 @@ import pytest
 
 from audit.analyzer.keyboard.base import (
     HELP_URL,
+    HELP_URL_KEYBOARD,
     LEVEL,
     RULE_IFRAME,
+    RULE_MODAL_FOCUS_NOT_CONTAINED,
+    RULE_MODAL_INITIAL_FOCUS_OUTSIDE,
+    RULE_MODAL_NO_KEYBOARD_DISMISS,
     RULE_NO_ESCAPE,
     RULE_STUCK,
     SC,
+    SC_KEYBOARD,
     KeyboardTrap,
+    ModalKeyboardFinding,
 )
 from audit.db import repo
 from audit.db.schema import connect
@@ -257,3 +263,104 @@ def test_upsert_keyboard_finding_preserves_human_status(
     # Human's status decision survives; the system-owned wording updates.
     assert row["status"] == "accepted_risk"
     assert "refined" in row["failure_summary"]
+
+
+# --------------------------------------------------------------------
+# ModalKeyboardFinding (SC 2.1.1) contract.
+# --------------------------------------------------------------------
+
+
+def test_modal_constants_pin_wcag_sc() -> None:
+    """The modal checks report SC 2.1.1, never the trap SC."""
+    assert SC_KEYBOARD == "2.1.1"
+    assert HELP_URL_KEYBOARD.endswith("/keyboard.html")
+
+
+def test_modal_rule_ids_are_distinct_and_new() -> None:
+    """Modal rule ids never collide with each other or the trap/legacy ids."""
+    modal_ids = {
+        RULE_MODAL_FOCUS_NOT_CONTAINED,
+        RULE_MODAL_NO_KEYBOARD_DISMISS,
+        RULE_MODAL_INITIAL_FOCUS_OUTSIDE,
+    }
+    assert len(modal_ids) == 3
+    assert not modal_ids & {RULE_STUCK, RULE_NO_ESCAPE, RULE_IFRAME}
+
+
+def test_modal_rule_ids_bypass_the_legacy_keyboard_lane() -> None:
+    """Regression guard: issues.py routes `keyboard-trap-modal-no-escape` and
+    `keyboard-trap-iframe` to a low-confidence legacy lane, and treats a
+    `keyboard-trap-stuck` row without the "Shift+Tab attempts" phrase as
+    legacy. The modal rules must never trip either predicate."""
+    legacy_exact = {"keyboard-trap-modal-no-escape", "keyboard-trap-iframe"}
+    for rule_id in (
+        RULE_MODAL_FOCUS_NOT_CONTAINED,
+        RULE_MODAL_NO_KEYBOARD_DISMISS,
+        RULE_MODAL_INITIAL_FOCUS_OUTSIDE,
+    ):
+        assert rule_id not in legacy_exact
+        assert rule_id != "keyboard-trap-stuck"
+        assert not rule_id.startswith("keyboard-trap-")
+
+
+def test_modal_finding_carries_sc_2_1_1_by_default() -> None:
+    f = ModalKeyboardFinding(
+        rule_id=RULE_MODAL_FOCUS_NOT_CONTAINED,
+        impact="serious",
+        target_selector="div#dlg",
+        failure_summary="Measured keyboard containment: focus left the dialog.",
+        html_snippet="<div id='dlg' role='dialog'>…</div>",
+        help="Keep focus in the dialog.",
+    )
+    assert f.criterion_sc == "2.1.1"
+    assert f.wcag_level == "A"
+    assert f.help_url == HELP_URL_KEYBOARD
+
+
+def test_modal_finding_target_hash_matches_shared_scheme() -> None:
+    """Same (rule, selector, snippet) → same hash; any part changes it."""
+    kwargs = {
+        "impact": "moderate",
+        "target_selector": "div#dlg",
+        "failure_summary": "a",
+        "html_snippet": "<div/>",
+        "help": "h",
+    }
+    a = ModalKeyboardFinding(rule_id=RULE_MODAL_NO_KEYBOARD_DISMISS, **kwargs)
+    a2 = ModalKeyboardFinding(rule_id=RULE_MODAL_NO_KEYBOARD_DISMISS, **kwargs)
+    b = ModalKeyboardFinding(rule_id=RULE_MODAL_FOCUS_NOT_CONTAINED, **kwargs)
+    assert a.target_hash == a2.target_hash
+    assert a.target_hash != b.target_hash
+
+
+def test_modal_to_repo_kwargs_round_trips_through_upsert(
+    tmp_scan_and_page: tuple[sqlite3.Connection, int, int],
+) -> None:
+    """A modal finding lands with pipeline='keyboard' and criterion_sc='2.1.1'."""
+    conn, scan_id, page_id = tmp_scan_and_page
+    f = ModalKeyboardFinding(
+        rule_id=RULE_MODAL_NO_KEYBOARD_DISMISS,
+        impact="moderate",
+        target_selector="div#dlg",
+        failure_summary=(
+            "Measured dismiss behavior: Escape left the dialog open. This is "
+            "not automatically a WCAG failure."
+        ),
+        html_snippet="<div id='dlg' role='dialog' aria-modal='true'>…</div>",
+        help="Modal dialogs should be dismissible with the keyboard.",
+    )
+    fid = repo.upsert_keyboard_finding(conn, page_id=page_id, scan_id=scan_id, **f.to_repo_kwargs())
+    assert fid > 0
+    row = conn.execute(
+        "SELECT pipeline, criterion_sc, wcag_sc, wcag_level, impact, rule_id, status "
+        "FROM page_a11y_findings WHERE id = ?",
+        (fid,),
+    ).fetchone()
+    assert row is not None
+    assert row["pipeline"] == "keyboard"
+    assert row["criterion_sc"] == "2.1.1"
+    assert row["wcag_sc"] == "2.1.1"
+    assert row["wcag_level"] == "A"
+    assert row["impact"] == "moderate"
+    assert row["rule_id"] == RULE_MODAL_NO_KEYBOARD_DISMISS
+    assert row["status"] == "new"

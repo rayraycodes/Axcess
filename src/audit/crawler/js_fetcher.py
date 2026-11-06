@@ -29,7 +29,7 @@ from audit.analyzer.interaction import (
     InteractionProbe,
     InteractionResult,
 )
-from audit.analyzer.keyboard import KeyboardProbe, KeyboardTrap
+from audit.analyzer.keyboard import KeyboardFinding, KeyboardProbe
 from audit.analyzer.responsive import ResponsiveFinding, ResponsiveProbe
 from audit.analyzer.visual import VisualFinding, VisualProbe
 from audit.crawler.fetcher import FetchError, FetchResult
@@ -295,7 +295,7 @@ class JsFetcher:
             # presses keys and alters focus — axe needs a quiet DOM.
             # Same gating as axe (success page, HTML content). Probe
             # itself never raises (it catches internally).
-            keyboard_traps: list[KeyboardTrap] = []
+            keyboard_traps: list[KeyboardFinding] = []
             if (
                 self._keyboard_probe is not None
                 and 200 <= status < 300

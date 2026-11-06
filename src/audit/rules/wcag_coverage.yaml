@@ -286,10 +286,15 @@ criteria:
     confidence: medium
     automated_check: >-
       axe flags some keyboard-inaccessible patterns; the keyboard probe confirms
-      focus can move through the page.
+      focus can move through the page. For modal dialogs open at page load, the
+      probe also records review leads: whether initial focus moved into the
+      dialog, whether an aria-modal dialog contains Tab focus, and whether the
+      dialog offers a keyboard dismiss (Escape or a focusable close control).
     manual_check: >-
       Confirm every control (menus, custom widgets, drag handles) is fully
-      operable by keyboard — the deepest part of this SC is manual.
+      operable by keyboard — the deepest part of this SC is manual. Dialogs
+      that open on user interaction are not probed automatically; test their
+      focus behavior and keyboard exits by hand.
 
   - sc: "2.1.2"
     name: "No Keyboard Trap"
@@ -301,7 +306,9 @@ criteria:
       The keyboard probe emits a review lead only when the same observable
       element resists repeated Tab and Shift+Tab exit attempts. It suppresses
       normal focus wrapping, small focus cycles, modal containment, and opaque
-      iframe or closed-shadow focus.
+      iframe or closed-shadow focus. Modal containment and Escape behavior are
+      observed and reported separately as SC 2.1.1 review leads; they are
+      never auto-reported as a 2.1.2 trap.
     manual_check: >-
       Reproduce every lead and test components that appear after interaction.
       Confirm whether arrow keys, Escape, a close control, or a documented

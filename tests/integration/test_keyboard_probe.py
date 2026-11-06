@@ -1,13 +1,19 @@
-"""Integration tests for the dynamic keyboard-trap probe (SC 2.1.2).
+"""Integration tests for the dynamic keyboard probe (SC 2.1.2 + SC 2.1.1).
 
 The probe runs against real Playwright on hand-built fixture pages in
-``tests/fixtures/site/sc_2_1_2/``. The accuracy contract is deliberately
-asymmetric: normal wrapping, modal containment, and iframe focus must be
-suppressed; only a repeatable bidirectional exit failure becomes a lead.
+``tests/fixtures/site/sc_2_1_2/`` and ``sc_2_1_1/``. The SC 2.1.2 accuracy
+contract is deliberately asymmetric: normal wrapping, modal containment,
+and iframe focus must be suppressed; only a repeatable bidirectional exit
+failure becomes a trap lead. Modal keyboard behavior (focus containment,
+Escape, initial focus) is reported separately as SC 2.1.1 review leads
+with the ``modal-*`` rule ids — never as a 2.1.2 trap.
 
-  * Negative: ``clean.html``, both modal fixtures, and the iframe fixture.
-  * Positive: ``tab_loop.html`` → ``keyboard-trap-stuck`` only after
-    Tab and Shift+Tab both fail repeatedly.
+  * Negative (for traps): ``clean.html``, both modal fixtures, and the
+    iframe fixture.
+  * Positive (traps): ``tab_loop.html`` → ``keyboard-trap-stuck`` only
+    after Tab and Shift+Tab both fail repeatedly.
+  * SC 2.1.1 modal checks: one fixture per rule id in ``sc_2_1_1/`` plus
+    the fully conforming ``modal_focus_trapped.html`` negative control.
 
 Skipped when Playwright + chromium aren't installed. The local dev
 machine has them after ``make setup``; CI installs them in the
@@ -25,14 +31,31 @@ from pathlib import Path
 import pytest
 
 from audit.analyzer.keyboard import KeyboardProbe
-from audit.analyzer.keyboard.base import RULE_STUCK
+from audit.analyzer.keyboard.base import (
+    RULE_MODAL_FOCUS_NOT_CONTAINED,
+    RULE_MODAL_INITIAL_FOCUS_OUTSIDE,
+    RULE_MODAL_NO_KEYBOARD_DISMISS,
+    RULE_STUCK,
+)
 
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "site" / "sc_2_1_2"
+FIXTURE_DIR_2_1_1 = Path(__file__).resolve().parents[1] / "fixtures" / "site" / "sc_2_1_1"
+
+_MODAL_RULE_IDS = {
+    RULE_MODAL_FOCUS_NOT_CONTAINED,
+    RULE_MODAL_INITIAL_FOCUS_OUTSIDE,
+    RULE_MODAL_NO_KEYBOARD_DISMISS,
+}
 
 
 def _file_url(name: str) -> str:
     """file:// URL for a fixture page."""
     return (FIXTURE_DIR / name).resolve().as_uri()
+
+
+def _file_url_2_1_1(name: str) -> str:
+    """file:// URL for an SC 2.1.1 modal fixture page."""
+    return (FIXTURE_DIR_2_1_1 / name).resolve().as_uri()
 
 
 # Skip the whole module if Playwright isn't importable / chromium not
@@ -91,11 +114,24 @@ async def test_clean_page_has_no_findings(page) -> None:  # type: ignore[no-unty
 
 @pytest.mark.asyncio
 async def test_modal_with_proper_escape_handler_clean(page) -> None:  # type: ignore[no-untyped-def]
-    """A modal that releases focus on Escape isn't flagged as no-escape."""
+    """A modal that releases focus on Escape isn't flagged as no-escape.
+
+    The SC 2.1.2 stance is unchanged: no ``keyboard-trap-*`` finding and no
+    dismiss advisory (Escape works). The fixture does NOT trap focus or move
+    initial focus into the dialog, so the SC 2.1.1 modal checks legitimately
+    report those two observations — assert them explicitly rather than
+    asserting an empty list.
+    """
     await page.goto(_file_url("modal_clean.html"))
     probe = KeyboardProbe(max_focusable=20, stuck_threshold=4)
     findings = await probe.run(page)
-    assert findings == []
+    assert all(not f.rule_id.startswith("keyboard-trap-") for f in findings)
+    assert all(f.criterion_sc != "2.1.2" for f in findings)
+    rule_ids = {f.rule_id for f in findings}
+    # Escape is handled → never a dismiss advisory.
+    assert RULE_MODAL_NO_KEYBOARD_DISMISS not in rule_ids
+    # aria-modal without a focus trap → containment lead (SC 2.1.1).
+    assert RULE_MODAL_FOCUS_NOT_CONTAINED in rule_ids
 
 
 # --------------------------------------------------------------------
@@ -240,11 +276,117 @@ async def test_forward_only_block_is_suppressed_when_reverse_exits(page) -> None
 
 @pytest.mark.asyncio
 async def test_modal_without_escape_is_not_automatically_a_trap(page) -> None:  # type: ignore[no-untyped-def]
-    """Escape is not the only conforming keyboard method for leaving a component."""
+    """Escape is not the only conforming keyboard method for leaving a component.
+
+    The SC 2.1.2 stance is unchanged: a modal without an Escape handler is
+    never reported as a ``keyboard-trap-*`` finding. The fixture's dialog has
+    a focusable "Cancel" button, so even the SC 2.1.1 dismiss advisory stays
+    quiet; what it legitimately gets are the containment and initial-focus
+    observations (no trap, no autofocus).
+    """
     await page.goto(_file_url("modal_no_escape.html"))
     probe = KeyboardProbe(max_focusable=20, stuck_threshold=4)
     findings = await probe.run(page)
-    assert findings == []
+    assert all(not f.rule_id.startswith("keyboard-trap-") for f in findings)
+    assert all(f.criterion_sc != "2.1.2" for f in findings)
+    rule_ids = {f.rule_id for f in findings}
+    # A focusable Cancel control counts as a keyboard dismiss affordance.
+    assert RULE_MODAL_NO_KEYBOARD_DISMISS not in rule_ids
+    assert RULE_MODAL_FOCUS_NOT_CONTAINED in rule_ids
+
+
+# --------------------------------------------------------------------
+# SC 2.1.1 modal keyboard checks — one fixture per rule id, plus the
+# fully conforming negative control.
+# --------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_conforming_modal_produces_no_modal_findings(page) -> None:  # type: ignore[no-untyped-def]
+    """Initial focus inside + focus trap + Escape close → zero modal findings."""
+    await page.goto(_file_url_2_1_1("modal_focus_trapped.html"))
+    probe = KeyboardProbe(max_focusable=20, stuck_threshold=4)
+    findings = await probe.run(page)
+    modal = [f for f in findings if f.rule_id in _MODAL_RULE_IDS]
+    assert modal == [], (
+        "Conforming modal fixture must produce no modal findings; got: "
+        + ", ".join(f"{f.rule_id} ({f.target_selector})" for f in modal)
+    )
+
+
+@pytest.mark.asyncio
+async def test_modal_focus_leak_is_detected(page) -> None:  # type: ignore[no-untyped-def]
+    """Tab escaping an open aria-modal dialog → modal-focus-not-contained only."""
+    await page.goto(_file_url_2_1_1("modal_focus_leaks.html"))
+    probe = KeyboardProbe(max_focusable=20, stuck_threshold=4)
+    findings = await probe.run(page)
+    modal = [f for f in findings if f.rule_id in _MODAL_RULE_IDS]
+    assert {f.rule_id for f in modal} == {RULE_MODAL_FOCUS_NOT_CONTAINED}, (
+        f"Expected only the containment lead; got: {[f.rule_id for f in modal]}"
+    )
+    (finding,) = modal
+    assert finding.criterion_sc == "2.1.1"
+    assert finding.wcag_level == "A"
+    assert finding.impact == "serious"
+    assert "dlg" in finding.target_selector
+    assert finding.failure_summary.startswith("Measured")
+    # Must never collide with the keyboard-trap-stuck currency phrase.
+    assert "Shift+Tab attempts" not in finding.failure_summary
+
+
+@pytest.mark.asyncio
+async def test_modal_without_any_keyboard_dismiss_is_advisory(page) -> None:  # type: ignore[no-untyped-def]
+    """No Escape handling and no close-named control → dismiss advisory only."""
+    await page.goto(_file_url_2_1_1("modal_no_dismiss.html"))
+    probe = KeyboardProbe(max_focusable=20, stuck_threshold=4)
+    findings = await probe.run(page)
+    modal = [f for f in findings if f.rule_id in _MODAL_RULE_IDS]
+    assert {f.rule_id for f in modal} == {RULE_MODAL_NO_KEYBOARD_DISMISS}, (
+        f"Expected only the dismiss advisory; got: {[f.rule_id for f in modal]}"
+    )
+    (finding,) = modal
+    assert finding.criterion_sc == "2.1.1"
+    assert finding.impact == "moderate"
+    # The summary must carry the advisory framing — this observation is
+    # explicitly not an automatic WCAG failure.
+    assert "not automatically a WCAG failure" in finding.failure_summary
+    # A proper focus trap must never be misread as an SC 2.1.2 trap.
+    assert all(not f.rule_id.startswith("keyboard-trap-") for f in findings)
+
+
+@pytest.mark.asyncio
+async def test_modal_open_at_load_without_focus_is_observed(page) -> None:  # type: ignore[no-untyped-def]
+    """Dialog open at load with focus on body → initial-focus observation only."""
+    await page.goto(_file_url_2_1_1("modal_initial_focus_body.html"))
+    probe = KeyboardProbe(max_focusable=20, stuck_threshold=4)
+    findings = await probe.run(page)
+    modal = [f for f in findings if f.rule_id in _MODAL_RULE_IDS]
+    assert {f.rule_id for f in modal} == {RULE_MODAL_INITIAL_FOCUS_OUTSIDE}, (
+        f"Expected only the initial-focus observation; got: {[f.rule_id for f in modal]}"
+    )
+    (finding,) = modal
+    assert finding.criterion_sc == "2.1.1"
+    assert finding.impact == "minor"
+
+
+@pytest.mark.asyncio
+async def test_modal_probe_never_raises_when_dialog_vanishes(page) -> None:  # type: ignore[no-untyped-def]
+    """A dialog that removes itself on first keydown must not crash the probe."""
+    await page.set_content(
+        "<!doctype html><html lang=en><body>"
+        "<a href='#x'>Link</a>"
+        "<div id=dlg role=dialog aria-modal=true>"
+        "<input type=text><button type=button>OK</button></div>"
+        "<script>document.addEventListener('keydown', () => {"
+        "const d = document.getElementById('dlg'); if (d) d.remove();"
+        "}, { once: true });</script>"
+        "</body></html>"
+    )
+    probe = KeyboardProbe(max_focusable=20, stuck_threshold=4)
+    # Must return a list, not raise — the dialog disappearing mid-walk is
+    # treated as "nothing to contain".
+    findings = await probe.run(page)
+    assert all(f.rule_id != RULE_MODAL_FOCUS_NOT_CONTAINED for f in findings)
 
 
 @pytest.mark.asyncio

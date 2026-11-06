@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>SC 2.1.1 fixture — fully conforming modal</title>
+</head>
+<body>
+  <main>
+    <h1>Modal with initial focus, focus trap, and Escape close</h1>
+    <p>Negative control: the modal checks must emit zero findings here.
+       Focus moves into the dialog on load, Tab cycles within it, and
+       Escape closes it.</p>
+
+    <a id="opener" href="/before">Background link</a>
+
+    <div id="dlg" role="dialog" aria-modal="true" aria-labelledby="dlg-title"
+         style="border:2px solid #333; padding:1rem; max-width:32rem;">
+      <h2 id="dlg-title">Confirm action</h2>
+      <input type="text" id="dlg-input" placeholder="Comment">
+      <button type="button" id="dlg-ok">OK</button>
+      <button type="button" id="dlg-close">Close</button>
+    </div>
+
+    <a href="/after">Footer link</a>
+
+    <script>
+      const dlg = document.getElementById('dlg');
+      // Initial focus moves into the dialog.
+      document.getElementById('dlg-input').focus();
+      dlg.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape') {
+          dlg.style.display = 'none';
+          document.getElementById('opener').focus();
+          return;
+        }
+        if (e.key !== 'Tab') return;
+        // Minimal focus trap: wrap Tab/Shift+Tab at the edges.
+        const f = dlg.querySelectorAll('a[href], button, input, select, textarea');
+        const first = f[0];
+        const last = f[f.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      });
+    </script>
+  </main>
+</body>
+</html>
